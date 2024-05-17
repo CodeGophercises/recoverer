@@ -1,30 +1,26 @@
 package middlewares
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 )
 
-// Interface embedded in a struct. Classic.
 type MyResponseWriter struct {
 	http.ResponseWriter
 	status int
-	data   []byte
+	buf    bytes.Buffer
 }
 
-// WriteHeader(statusCode int)
 func (mrw *MyResponseWriter) WriteHeader(statusCode int) {
-	// shadow the original impl
 	mrw.status = statusCode
 }
 
-// Write([]byte) (int, error)
 func (mrw *MyResponseWriter) Write(b []byte) (int, error) {
-	// Dont actually write, that is irreversible
-	mrw.data = append(mrw.data, b...)
-	return len(b), nil
+	return mrw.buf.Write(b)
 }
 
 func (mrw *MyResponseWriter) flush() {
@@ -33,8 +29,7 @@ func (mrw *MyResponseWriter) flush() {
 		status = http.StatusOK
 	}
 	mrw.ResponseWriter.WriteHeader(status)
-
-	mrw.ResponseWriter.Write(mrw.data)
+	mrw.ResponseWriter.Write(mrw.buf.Bytes())
 }
 
 // Recoverer recovers the wrapped handler from panicking and sends out appropriate client response
@@ -51,20 +46,27 @@ func (r *recoverer) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		if e := recover(); e != nil {
 			// Logs the error and the stack trace
 			log.Printf("got error:  %s\n", e)
-			log.Printf("stack trace: %s\n", string(debug.Stack()))
+			stackTrace := string(debug.Stack())
+			log.Printf("stack trace: %s\n", stackTrace)
 
 			message := r.message
+			targetPattern := `(?m:^\s(.+):(\d+))`
+			re := regexp.MustCompile(targetPattern)
+			matches := re.FindAllStringSubmatch(stackTrace, -1)
+			if matches != nil {
+				stackTrace = re.ReplaceAllString(stackTrace, `<a href="/debug/?path=$1&line=$2">$0</a>`)
+			}
 
 			// if env is dev, send error and stack trace to client
 			if r.dev {
-				message = fmt.Sprintf("Error:%s\n\n%s", e, string(debug.Stack()))
+				message = fmt.Sprintf("<h1>Uh oh!</h1><h3>Error</h3>%s\n\n<h3>Stack trace</h3><pre>%s</pre>", e, stackTrace)
 			}
-			http.Error(w, message, r.statusCode)
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(r.statusCode)
+			w.Write([]byte(message))
 
 		}
 	}()
-
-	// Wrap w in our own ResponseWriter that we can control
 	nw := &MyResponseWriter{}
 	nw.ResponseWriter = w
 	r.handler.ServeHTTP(nw, req)
